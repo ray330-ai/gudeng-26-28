@@ -193,12 +193,14 @@
   <div class="tracker-header">
     <div>
       <div class="tracker-title">2026 年實際營收輸入</div>
-      <div class="tracker-sub">輸入每月營收（億元）自動推算累計年化 EPS 與達成率 ｜ 或按下方按鈕嘗試自動抓取</div>
+      <div class="tracker-sub">輸入每月營收（億元）自動推算年化 EPS 與達成率｜資料自動儲存於瀏覽器，下次開啟自動載入</div>
     </div>
     <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
-      <button class="fetch-btn" id="fetchBtn" onclick="fetchLatest()">
-        <span>⚡</span> 自動抓取最新月營收
-      </button>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
+        <span id="saveIndicator" style="font-size:12px;font-family:'IBM Plex Mono',monospace;opacity:0;transition:opacity .5s"></span>
+        <button class="fetch-btn" style="background:rgba(255,68,102,.08);border-color:rgba(255,68,102,.4);color:#ff7788;font-size:13px;padding:8px 14px" onclick="clearState()" title="清除所有已儲存資料">🗑️ 清除記錄</button>
+        <button class="fetch-btn" id="fetchBtn" onclick="fetchLatest()">⚡ 自動抓取月營收</button>
+      </div>
       <div class="fetch-status" id="fetchStatus"></div>
     </div>
   </div>
@@ -447,11 +449,13 @@ function onMonthInput(i,v){
     cell.classList.toggle('cell-filled',monthRevs[i]>0);
   }
   updateTracker();
+  saveState();
 }
 
 function onQInput(i,v){
   qEps[i]=v===''?null:v;
   updateTracker();
+  saveState();
 }
 
 function setCowos(val,btn){
@@ -459,6 +463,7 @@ function setCowos(val,btn){
   document.querySelectorAll('.cstatus-btn').forEach(b=>b.classList.remove('active'));
   btn.classList.add('active');
   updateTracker();
+  saveState();
 }
 
 // ── UPDATE TRACKER SUMMARY ──
@@ -586,6 +591,7 @@ function setScenario(k,btn){
   btn.classList.add(SC[k].cls);
   render();
   updateTracker();
+  saveState();
 }
 
 function render(){
@@ -706,11 +712,108 @@ function drawChart(revised){
   svg.style.width='100%';
 }
 
-// ── INIT ──
-buildMonthGrid();
-buildQGrid();
-updateTracker();
-render();
+// ── STORAGE KEY ──
+const STORE_KEY = 'gudeng-eps-tracker-v1';
+
+// ── SAVE STATE ──
+async function saveState(){
+  const state = {
+    cur,
+    cowosState,
+    monthRevs,
+    qEps,
+    savedAt: new Date().toLocaleString('zh-TW',{hour12:false})
+  };
+  try {
+    await window.storage.set(STORE_KEY, JSON.stringify(state));
+    showSaveIndicator('✅ 已儲存');
+  } catch(e) {
+    showSaveIndicator('⚠️ 儲存失敗', true);
+  }
+}
+
+// ── LOAD STATE ──
+async function loadState(){
+  try {
+    const result = await window.storage.get(STORE_KEY);
+    if(!result) return false;
+    const state = JSON.parse(result.value);
+    if(state.monthRevs) monthRevs = state.monthRevs;
+    if(state.qEps)      qEps      = state.qEps;
+    if(state.cowosState) cowosState = state.cowosState;
+    if(state.cur)       cur        = state.cur;
+    return state;
+  } catch(e) {
+    return false;
+  }
+}
+
+// ── CLEAR STATE ──
+async function clearState(){
+  try {
+    monthRevs = Array(12).fill(null);
+    qEps = Array(4).fill(null);
+    cowosState = 'pending';
+    cur = 'bull';
+    await window.storage.delete(STORE_KEY);
+    showSaveIndicator('🗑️ 已清除所有資料');
+    // Reset UI
+    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active-bull','active-base','active-bear'));
+    document.querySelector('.tab.active-bull, .scenario-tabs .tab:first-child').classList.add('active-bull');
+    document.querySelectorAll('.cstatus-btn').forEach(b=>{
+      b.classList.remove('active');
+      if(b.dataset.val==='pending') b.classList.add('active');
+    });
+    buildMonthGrid();
+    buildQGrid();
+    updateTracker();
+    render();
+  } catch(e) {
+    showSaveIndicator('⚠️ 清除失敗', true);
+  }
+}
+
+// ── SAVE INDICATOR ──
+let _saveTimer = null;
+function showSaveIndicator(msg, isErr=false){
+  const el = document.getElementById('saveIndicator');
+  if(!el) return;
+  el.textContent = msg;
+  el.style.color = isErr ? '#ff4466' : '#00ff99';
+  el.style.opacity = '1';
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(()=>{ el.style.opacity='0'; }, 3000);
+}
+
+// ── INIT WITH STORAGE LOAD ──
+async function init(){
+  const loaded = await loadState();
+
+  buildMonthGrid();
+  buildQGrid();
+
+  // Restore scenario tab UI
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active-bull','active-base','active-bear'));
+  const activeTab = document.querySelector(`.scenario-tabs .tab:nth-child(${cur==='bull'?1:cur==='base'?2:3})`);
+  if(activeTab) activeTab.classList.add(SC[cur].cls);
+
+  // Restore CoWoS button UI
+  document.querySelectorAll('.cstatus-btn').forEach(b=>{
+    b.classList.remove('active');
+    if(b.dataset.val===cowosState) b.classList.add('active');
+  });
+
+  if(loaded){
+    const msg = `📂 已載入上次記錄（${loaded.savedAt||''}）`;
+    document.getElementById('fetchStatus').style.color='#bb88ff';
+    document.getElementById('fetchStatus').textContent=msg;
+  }
+
+  updateTracker();
+  render();
+}
+
+init();
 </script>
 </body>
 </html>
