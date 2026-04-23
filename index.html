@@ -195,13 +195,28 @@
       <div class="tracker-title">2026 年實際營收輸入</div>
       <div class="tracker-sub">輸入每月營收（億元）自動推算年化 EPS 與達成率｜資料自動儲存於瀏覽器，下次開啟自動載入</div>
     </div>
-    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
-        <span id="saveIndicator" style="font-size:12px;font-family:'IBM Plex Mono',monospace;opacity:0;transition:opacity .5s"></span>
-        <button class="fetch-btn" style="background:rgba(255,68,102,.08);border-color:rgba(255,68,102,.4);color:#ff7788;font-size:13px;padding:8px 14px" onclick="clearState()" title="清除所有已儲存資料">🗑️ 清除記錄</button>
-        <button class="fetch-btn" id="fetchBtn" onclick="fetchLatest()">⚡ 自動抓取月營收</button>
+    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
+      <!-- 年月選擇器 -->
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
+        <select id="fetch_year" style="background:#181818;border:1px solid #3a3a3a;color:#fff;border-radius:6px;padding:6px 10px;font-size:13px;font-family:'IBM Plex Mono',monospace">
+          <option value="115">民國 115（2026）</option>
+          <option value="114">民國 114（2025）</option>
+          <option value="113">民國 113（2024）</option>
+        </select>
+        <select id="fetch_month" style="background:#181818;border:1px solid #3a3a3a;color:#fff;border-radius:6px;padding:6px 10px;font-size:13px;font-family:'IBM Plex Mono',monospace">
+          <option value="1">1月</option><option value="2">2月</option><option value="3">3月</option>
+          <option value="4">4月</option><option value="5">5月</option><option value="6">6月</option>
+          <option value="7">7月</option><option value="8">8月</option><option value="9">9月</option>
+          <option value="10">10月</option><option value="11">11月</option><option value="12">12月</option>
+        </select>
+        <button class="fetch-btn" id="fetchBtn" onclick="fetchMOPS()" style="padding:8px 16px;font-size:13px">📡 抓取單月</button>
+        <button class="fetch-btn" id="fetchAllBtn" onclick="fetchMOPSAll()" style="padding:8px 14px;font-size:12px;background:rgba(187,136,255,.06);border-color:rgba(187,136,255,.3)">📡 批次抓取全部</button>
+        <button class="fetch-btn" style="background:rgba(255,68,102,.08);border-color:rgba(255,68,102,.4);color:#ff7788;font-size:12px;padding:8px 12px" onclick="clearState()">🗑️ 清除</button>
       </div>
-      <div class="fetch-status" id="fetchStatus"></div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span id="saveIndicator" style="font-size:12px;font-family:'IBM Plex Mono',monospace;opacity:0;transition:opacity .5s"></span>
+        <div id="fetchStatus" style="font-size:12px;font-family:'IBM Plex Mono',monospace;color:#888;min-height:18px"></div>
+      </div>
     </div>
   </div>
 
@@ -551,37 +566,171 @@ function renderEpsProgress(revised,revisedPct){
 }
 
 // ── AUTO FETCH ──
-async function fetchLatest(){
-  const btn=document.getElementById('fetchBtn');
-  const status=document.getElementById('fetchStatus');
-  btn.classList.add('loading');
-  btn.innerHTML='⏳ 讀取中...';
-  status.style.color='#aaa';
-  status.textContent='嘗試填入已知公開月營收數據...';
-  await new Promise(r=>setTimeout(r,1200));
+// ══════════════════════════════════════════════
+// MOPS 真實抓取（家登 3680）
+// 策略：直接打 MOPS → CORS 失敗 → allorigins proxy → 失敗 → 優雅降級
+// MOPS 月營收彙總表：
+//   https://mops.twse.com.tw/nas/t21/sii/t21sc03_{ROC年}_{月}_0.html
+// 頁面為 Big5 編碼，用 TextDecoder('big5') 解碼
+// 家登股票代號：3680（上市 sii）
+// 營收單位：MOPS 為千元，本工具顯示億元（÷100000）
+// ══════════════════════════════════════════════
 
-  // Pre-fill known 2026 public data from news reports
-  const known={0:6.34, 1:5.70, 2:6.61}; // Jan–Mar 2026 from public reports
-  let filled=0;
-  Object.entries(known).forEach(([i,v])=>{
-    if(monthRevs[parseInt(i)]===null){
-      monthRevs[parseInt(i)]=v;
-      filled++;
-    }
-  });
+const STOCK_CODE = '3680';
+const STOCK_BOARD = 'sii'; // 上市
 
-  btn.classList.remove('loading');
-  btn.innerHTML='⚡ 自動抓取最新月營收';
+function setFetchStatus(msg, type='info'){
+  const el = document.getElementById('fetchStatus');
+  if(!el) return;
+  const colors = {
+    info:    '#aaaaaa',
+    success: '#00ff99',
+    error:   '#ff4466',
+    warn:    '#ffcc00'
+  };
+  el.style.color = colors[type] || '#aaa';
+  el.innerHTML = msg;
+}
 
-  if(filled>0){
-    status.style.color='#00ff99';
-    status.textContent=`✅ 已自動填入 ${filled} 筆 2026 年月營收（1–3月）`;
-  } else {
-    status.style.color='#ffcc00';
-    status.textContent='⚠️ 已有最新數據，如需更新請手動輸入';
+// 解析 MOPS HTML，找出 3680 那一行的當月營收（千元）
+function parseMOPSTable(html, adYear, month){
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  for(const row of doc.querySelectorAll('tr')){
+    const cells = row.querySelectorAll('td');
+    if(cells.length < 4) continue;
+    const code = cells[0].textContent.replace(/\s/g,'');
+    if(code !== STOCK_CODE) continue;
+    // cells[2] = 當月營收（千元）
+    const rev = parseInt(cells[2].textContent.replace(/[,\s]/g,''));
+    if(isNaN(rev) || rev <= 0) continue;
+    return { year: adYear, month, revK: rev }; // revK = 千元
   }
+  return null;
+}
+
+// 抓單月：直連 MOPS → allorigins proxy，都支援 Big5 解碼
+async function fetchOneMonth(adYear, month){
+  const roc = adYear - 1911;
+  const base = `https://mops.twse.com.tw/nas/t21/${STOCK_BOARD}/t21sc03_${roc}_${month}_0.html`;
+  const urls = [
+    base,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(base)}`
+  ];
+  for(const url of urls){
+    try {
+      const resp = await fetch(url, { signal: AbortSignal.timeout(12000) });
+      if(!resp.ok) continue;
+      const buf  = await resp.arrayBuffer();
+      const text = new TextDecoder('big5', { fatal: false }).decode(buf);
+      const result = parseMOPSTable(text, adYear, month);
+      if(result) return result;
+    } catch(e){ /* 繼續嘗試下一個 */ }
+  }
+  return null;
+}
+
+// 單月抓取（綁定「📡 抓取單月」按鈕）
+async function fetchMOPS(){
+  const rocYear = parseInt(document.getElementById('fetch_year').value);
+  const month   = parseInt(document.getElementById('fetch_month').value);
+  const adYear  = rocYear + 1911;
+  const btn     = document.getElementById('fetchBtn');
+
+  btn.disabled = true;
+  btn.innerHTML = '⏳ 抓取中…';
+  setFetchStatus(`📡 連線公開資訊觀測站 ${adYear}年${month}月…`, 'info');
+
+  try {
+    const result = await fetchOneMonth(adYear, month);
+    if(!result) throw new Error(`找不到 ${STOCK_CODE} 資料（該月尚未公告，或板別不符）`);
+
+    // 轉億元（MOPS 千元 ÷ 100000）
+    const revB = result.revK / 100000;
+    const mIdx = month - 1; // 0-indexed
+
+    // 只填入 2026 年資料進 monthRevs
+    if(adYear === 2026){
+      monthRevs[mIdx] = parseFloat(revB.toFixed(4));
+      buildMonthGrid();
+      updateTracker();
+      saveState();
+    }
+
+    // 計算 YoY
+    const ref = REF2025[mIdx];
+    const yoy = ref ? ((revB/ref - 1)*100).toFixed(1) : null;
+    setFetchStatus(
+      `✅ ${adYear}年${month}月　<strong>${(result.revK/1000).toFixed(0)}百萬</strong>（${revB.toFixed(3)}億元）` +
+      (yoy !== null ? `　YoY <span style="color:${parseFloat(yoy)>=0?'#00ff99':'#ff4466'}">${parseFloat(yoy)>=0?'+':''}${yoy}%</span>` : '') +
+      (adYear !== 2026 ? `<br><span style="color:#888">※ 僅 2026 年資料會自動填入追蹤器</span>` : ''),
+      'success'
+    );
+  } catch(e) {
+    setFetchStatus(
+      `❌ 抓取失敗：${e.message}<br>` +
+      `可能原因：① 該月尚未公告　② 瀏覽器封鎖跨域請求<br>` +
+      `<span style="color:#888">請稍後重試，或直接在下方格子手動輸入</span>`,
+      'error'
+    );
+  }
+  btn.disabled = false;
+  btn.innerHTML = '📡 抓取單月';
+}
+
+// 批次抓取（2026年至今所有未填月份）
+async function fetchMOPSAll(){
+  const btn = document.getElementById('fetchAllBtn');
+  btn.disabled = true;
+  btn.innerHTML = '⏳ 批次中…';
+
+  const now   = new Date();
+  const curAD = now.getFullYear();
+  // 月營收通常於次月 10 日前公告，取上個月
+  const curM  = now.getMonth(); // 0-indexed，即上個月（1-indexed）
+
+  // 只批次 2026 年（本工具追蹤範圍）
+  const targets = [];
+  for(let m = 1; m <= (curAD === 2026 ? curM : 12); m++){
+    if(monthRevs[m-1] === null) targets.push(m);
+  }
+
+  if(targets.length === 0){
+    setFetchStatus('⚠️ 2026 年所有已公告月份均已填入，無需批次抓取', 'warn');
+    btn.disabled = false;
+    btn.innerHTML = '📡 批次抓取全部';
+    return;
+  }
+
+  let ok = 0, fail = 0;
+  for(const m of targets){
+    setFetchStatus(`📡 抓取 2026年${m}月（${ok+fail+1}/${targets.length}）…`, 'info');
+    const result = await fetchOneMonth(2026, m);
+    if(result){
+      monthRevs[m-1] = parseFloat((result.revK / 100000).toFixed(4));
+      ok++;
+    } else {
+      fail++;
+    }
+    await new Promise(r => setTimeout(r, 400)); // 避免過快被 MOPS 限速
+  }
+
   buildMonthGrid();
   updateTracker();
+  saveState();
+
+  btn.disabled = false;
+  btn.innerHTML = '📡 批次抓取全部';
+
+  if(ok > 0){
+    setFetchStatus(`✅ 批次完成：成功 ${ok} 筆，失敗 ${fail} 筆`, ok>0?'success':'warn');
+  } else {
+    setFetchStatus(
+      `⚠️ 批次失敗（共 ${fail} 筆）<br>` +
+      `可能該月尚未公告，或網路封鎖跨域請求。請手動輸入或稍後重試。`,
+      'error'
+    );
+  }
 }
 
 // ── MAIN RENDER ──
@@ -787,6 +936,12 @@ function showSaveIndicator(msg, isErr=false){
 
 // ── INIT WITH STORAGE LOAD ──
 async function init(){
+  // 預設年月選擇器為上個月（月營收通常次月公告）
+  const now = new Date();
+  const lastMonth = now.getMonth() === 0 ? 12 : now.getMonth(); // 1-indexed 上個月
+  const sel = document.getElementById('fetch_month');
+  if(sel) sel.value = String(lastMonth);
+
   const loaded = await loadState();
 
   buildMonthGrid();
